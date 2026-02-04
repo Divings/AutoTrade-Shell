@@ -1,14 +1,29 @@
 /*
-  tradeshell.c - Oracle Linux AutoTrade Dedicated Shell (Fixed Full)
+  tradeshell.c - Oracle Linux AutoTrade Dedicated Shell (Full + HOME + cd)
 
   Builtins:
     help, exit,
+    cd,
     start, stop, restart, status, health,
     log, config, backup, restore,
     nano, ls, cat, scat, grep
 
+  Tools/services:
+    - systemctl ... fx-autotrade
+    - log    : python3 /opt/tools/get_log.py
+    - config : python3 /opt/tools/xmledit.py   (internal-complete; args passthrough)
+    - backup : python3 /opt/Innovations/tools/Buckup.py
+    - restore: python3 /opt/Innovations/tools/Restore.py
+
   Notes:
     - Arguments are split by whitespace only (no quotes, no pipes, no redirects).
+    - On startup, chdir(HOME) if HOME is set.
+    - cd supports:
+        cd            -> HOME
+        cd ~          -> HOME
+        cd ~/path     -> HOME/path
+        cd /path      -> /path
+        cd relative   -> relative
     - sudo is auto-detected:
         if `sudo -n true` returns 0, systemctl uses sudo.
       scat always uses sudo.
@@ -119,50 +134,60 @@ static void print_usage(void)
 {
   puts("AutoTrade Shell (Oracle Linux)");
   puts("Commands:");
+  puts("  help                  show this help");
+  puts("  exit                  quit");
+  puts("  cd [DIR]              change directory (default: HOME; supports ~ and ~/...)");
+  puts("");
   puts("  start                 [sudo] systemctl start fx-autotrade");
   puts("  stop                  [sudo] systemctl stop fx-autotrade");
   puts("  restart               [sudo] systemctl restart fx-autotrade");
   puts("  status                [sudo] systemctl status fx-autotrade");
   puts("  health                service + log + disk + mem + time");
+  puts("");
   puts("  log [ARGS...]         python3 /opt/tools/get_log.py [ARGS...]");
   puts("  config [ARGS...]      python3 /opt/tools/xmledit.py [ARGS...]");
   puts("  backup [ARGS...]      python3 /opt/Innovations/tools/Buckup.py [ARGS...]");
   puts("  restore [ARGS...]     python3 /opt/Innovations/tools/Restore.py [ARGS...]");
+  puts("");
   puts("  nano [ARGS...]        nano [ARGS...]");
   puts("  ls [ARGS...]          ls [ARGS...]");
   puts("  cat [ARGS...]         cat [ARGS...]");
   puts("  scat [ARGS...]        sudo cat [ARGS...]");
   puts("  grep [ARGS...]        grep [ARGS...]");
-  puts("  help                  show this help");
-  puts("  exit                  quit");
   puts("");
   puts("Notes:");
   puts("  - Arguments are split by whitespace only (no quotes/pipes/redirects).");
+  puts("  - On startup, chdir(HOME) if HOME is set.");
   puts("  - sudo is auto-detected (sudo -n true). systemctl uses sudo when available.");
 }
 
 // ====== builtins declarations ======
 static int sh_help(char **args);
 static int sh_exit(char **args);
+static int sh_cd(char **args);
+
 static int sh_start(char **args);
 static int sh_stop(char **args);
 static int sh_restart(char **args);
 static int sh_status(char **args);
 static int sh_health(char **args);
+
 static int sh_log(char **args);
 static int sh_config(char **args);
 static int sh_backup(char **args);
 static int sh_restore(char **args);
+
 static int sh_nano(char **args);
 static int sh_ls(char **args);
 static int sh_cat(char **args);
 static int sh_scat(char **args);
 static int sh_grep(char **args);
 
-// ====== builtin tables (REAL definitions, no redeclare later) ======
+// ====== builtin tables ======
 static char *builtin_str[] = {
   "help",
   "exit",
+  "cd",
   "start",
   "stop",
   "restart",
@@ -182,6 +207,7 @@ static char *builtin_str[] = {
 static int (*builtin_func[])(char **) = {
   &sh_help,
   &sh_exit,
+  &sh_cd,
   &sh_start,
   &sh_stop,
   &sh_restart,
@@ -206,6 +232,39 @@ static int num_builtins(void)
 // ====== builtins implementations ======
 static int sh_help(char **args) { (void)args; print_usage(); return 1; }
 static int sh_exit(char **args) { (void)args; return 0; }
+
+static int sh_cd(char **args)
+{
+  const char *home = getenv("HOME");
+  const char *target = NULL;
+
+  if (!args[1] || strcmp(args[1], "~") == 0) {
+    target = (home && *home) ? home : "/";
+  } else if (args[1][0] == '~' && args[1][1] == '/') {
+    if (!home || !*home) {
+      fprintf(stderr, "trade: cd: HOME is not set\n");
+      return 1;
+    }
+    // target = HOME + "/path..."
+    size_t len = strlen(home) + strlen(args[1]); // includes "~"
+    char *buf = malloc(len + 1);
+    if (!buf) { perror("trade: malloc"); return 1; }
+    strcpy(buf, home);
+    strcat(buf, args[1] + 1); // skip '~', keep "/..."
+    if (chdir(buf) != 0) {
+      fprintf(stderr, "trade: cd: %s: %s\n", buf, strerror(errno));
+    }
+    free(buf);
+    return 1;
+  } else {
+    target = args[1];
+  }
+
+  if (chdir(target) != 0) {
+    fprintf(stderr, "trade: cd: %s: %s\n", target, strerror(errno));
+  }
+  return 1;
+}
 
 static int sh_start(char **args)
 {
@@ -486,6 +545,12 @@ static void loop(void)
 
 int main(void)
 {
+  // Start in HOME directory if available
+  const char *home = getenv("HOME");
+  if (home && *home) {
+    (void)chdir(home);
+  }
+
   detect_sudo();
   printf("AutoTrade Shell (trade)  sudo=%s  type 'help'\n", g_use_sudo ? "on" : "off");
   loop();
