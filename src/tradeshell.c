@@ -1,37 +1,31 @@
 /*
-  tradeshell.c - Oracle Linux AutoTrade Dedicated Shell (Full + HOME + cd)
+  tradeshell.c - Oracle Linux AutoTrade Dedicated Shell
+  Full: HOME start + cd + pwd + quote parsing + pipes + update command.
 
-  Builtins:
-    help, exit,
-    cd,
-    start, stop, restart, status, health,
+  Builtins (parent-only, not pipe-able):
+    help, exit, cd, pwd,
+    start, stop, restart, status, health
+
+  Exec-style commands (pipe-able):
     log, config, backup, restore,
-    nano, ls, cat, scat, grep
-
-  Tools/services:
-    - systemctl ... fx-autotrade
-    - log    : python3 /opt/tools/get_log.py
-    - config : python3 /opt/tools/xmledit.py   (internal-complete; args passthrough)
-    - backup : python3 /opt/Innovations/tools/Buckup.py
-    - restore: python3 /opt/Innovations/tools/Restore.py
+    nano, ls, cat, scat, grep,
+    update
 
   Notes:
-    - Arguments are split by whitespace only (no quotes, no pipes, no redirects).
+    - Quote support: "..." and '...'
+      - Backslash escapes are handled in unquoted and double-quoted strings.
+      - Single quotes take everything literally until next '.
+    - Pipe support: cmd1 | cmd2 | ...
+      - Only exec-style commands are allowed in pipelines.
     - On startup, chdir(HOME) if HOME is set.
-    - cd supports:
-        cd            -> HOME
-        cd ~          -> HOME
-        cd ~/path     -> HOME/path
-        cd /path      -> /path
-        cd relative   -> relative
-    - sudo is auto-detected:
-        if `sudo -n true` returns 0, systemctl uses sudo.
-      scat always uses sudo.
+    - sudo auto-detect: if `sudo -n true` works, use sudo for systemctl.
+      - scat always uses sudo cat
+      - update uses sudo when available; otherwise tries without sudo.
 
   Build:
     gcc -O2 -Wall -Wextra -o tradeshell tradeshell.c
 
-  Optional readline (history):
+  Optional readline:
     sudo dnf install -y readline-devel
     gcc -O2 -Wall -Wextra -DUSE_READLINE -o tradeshell tradeshell.c -lreadline
 */
@@ -54,6 +48,7 @@ static const char *SERVICE_NAME = "fx-autotrade";
 
 static const char *SYSTEMCTL = "systemctl";
 static const char *PYTHON3   = "python3";
+static const char *BASH      = "bash";
 static const char *NANO      = "nano";
 static const char *LS        = "ls";
 static const char *CAT       = "cat";
@@ -63,6 +58,7 @@ static const char *LOG_TOOL     = "/opt/tools/get_log.py";
 static const char *CONFIG_TOOL  = "/opt/tools/xmledit.py";
 static const char *BACKUP_TOOL  = "/opt/Innovations/tools/Buckup.py";
 static const char *RESTORE_TOOL = "/opt/Innovations/tools/Restore.py";
+static const char *UPDATE_TOOL  = "/opt/Innovations/System/Update.sh";
 
 static const char *SUDO = "sudo";
 static int g_use_sudo = 0;
@@ -73,6 +69,7 @@ static int run_cmd_capture_rc(char *const argv[]);
 static void detect_sudo(void);
 static void print_usage(void);
 
+// ====== exec argv builder (passthrough) ======
 static void build_passthrough_argv(char **args,
                                    const char *prefix0,
                                    const char *prefix1,
@@ -124,7 +121,6 @@ static int run_cmd_capture_rc(char *const argv[])
 
 static void detect_sudo(void)
 {
-  // sudo -n true => 0 if non-interactive sudo allowed (NOPASSWD or cached)
   char *const argv[] = {(char*)SUDO, "-n", "true", NULL};
   int rc = run_cmd_capture_rc(argv);
   g_use_sudo = (rc == 0);
@@ -137,6 +133,7 @@ static void print_usage(void)
   puts("  help                  show this help");
   puts("  exit                  quit");
   puts("  cd [DIR]              change directory (default: HOME; supports ~ and ~/...)");
+  puts("  pwd                   print current directory");
   puts("");
   puts("  start                 [sudo] systemctl start fx-autotrade");
   puts("  stop                  [sudo] systemctl stop fx-autotrade");
@@ -148,6 +145,7 @@ static void print_usage(void)
   puts("  config [ARGS...]      python3 /opt/tools/xmledit.py [ARGS...]");
   puts("  backup [ARGS...]      python3 /opt/Innovations/tools/Buckup.py [ARGS...]");
   puts("  restore [ARGS...]     python3 /opt/Innovations/tools/Restore.py [ARGS...]");
+  puts("  update [ARGS...]      [sudo] bash /opt/Innovations/System/Update.sh [ARGS...]");
   puts("");
   puts("  nano [ARGS...]        nano [ARGS...]");
   puts("  ls [ARGS...]          ls [ARGS...]");
@@ -155,81 +153,18 @@ static void print_usage(void)
   puts("  scat [ARGS...]        sudo cat [ARGS...]");
   puts("  grep [ARGS...]        grep [ARGS...]");
   puts("");
+  puts("Pipes:");
+  puts("  cat file | grep KEYWORD");
+  puts("");
+  puts("Quotes:");
+  puts("  cat \"file name.txt\" | grep \"some word\"");
+  puts("");
   puts("Notes:");
-  puts("  - Arguments are split by whitespace only (no quotes/pipes/redirects).");
-  puts("  - On startup, chdir(HOME) if HOME is set.");
-  puts("  - sudo is auto-detected (sudo -n true). systemctl uses sudo when available.");
+  puts("  - Only exec-style commands can be used in pipelines.");
+  puts("  - systemctl uses sudo when available (sudo -n true).");
 }
 
-// ====== builtins declarations ======
-static int sh_help(char **args);
-static int sh_exit(char **args);
-static int sh_cd(char **args);
-
-static int sh_start(char **args);
-static int sh_stop(char **args);
-static int sh_restart(char **args);
-static int sh_status(char **args);
-static int sh_health(char **args);
-
-static int sh_log(char **args);
-static int sh_config(char **args);
-static int sh_backup(char **args);
-static int sh_restore(char **args);
-
-static int sh_nano(char **args);
-static int sh_ls(char **args);
-static int sh_cat(char **args);
-static int sh_scat(char **args);
-static int sh_grep(char **args);
-
-// ====== builtin tables ======
-static char *builtin_str[] = {
-  "help",
-  "exit",
-  "cd",
-  "start",
-  "stop",
-  "restart",
-  "status",
-  "health",
-  "log",
-  "config",
-  "backup",
-  "restore",
-  "nano",
-  "ls",
-  "cat",
-  "scat",
-  "grep",
-};
-
-static int (*builtin_func[])(char **) = {
-  &sh_help,
-  &sh_exit,
-  &sh_cd,
-  &sh_start,
-  &sh_stop,
-  &sh_restart,
-  &sh_status,
-  &sh_health,
-  &sh_log,
-  &sh_config,
-  &sh_backup,
-  &sh_restore,
-  &sh_nano,
-  &sh_ls,
-  &sh_cat,
-  &sh_scat,
-  &sh_grep,
-};
-
-static int num_builtins(void)
-{
-  return (int)(sizeof(builtin_str) / sizeof(builtin_str[0]));
-}
-
-// ====== builtins implementations ======
+// ====== builtins (parent-only) ======
 static int sh_help(char **args) { (void)args; print_usage(); return 1; }
 static int sh_exit(char **args) { (void)args; return 0; }
 
@@ -245,12 +180,11 @@ static int sh_cd(char **args)
       fprintf(stderr, "trade: cd: HOME is not set\n");
       return 1;
     }
-    // target = HOME + "/path..."
-    size_t len = strlen(home) + strlen(args[1]); // includes "~"
+    size_t len = strlen(home) + strlen(args[1]);
     char *buf = malloc(len + 1);
     if (!buf) { perror("trade: malloc"); return 1; }
     strcpy(buf, home);
-    strcat(buf, args[1] + 1); // skip '~', keep "/..."
+    strcat(buf, args[1] + 1); // skip '~'
     if (chdir(buf) != 0) {
       fprintf(stderr, "trade: cd: %s: %s\n", buf, strerror(errno));
     }
@@ -263,6 +197,19 @@ static int sh_cd(char **args)
   if (chdir(target) != 0) {
     fprintf(stderr, "trade: cd: %s: %s\n", target, strerror(errno));
   }
+  return 1;
+}
+
+static int sh_pwd(char **args)
+{
+  (void)args;
+  char *cwd = getcwd(NULL, 0);
+  if (!cwd) {
+    fprintf(stderr, "trade: pwd: %s\n", strerror(errno));
+    return 1;
+  }
+  puts(cwd);
+  free(cwd);
   return 1;
 }
 
@@ -357,162 +304,491 @@ static int sh_health(char **args)
   return 1;
 }
 
-static int sh_log(char **args)
-{
-  char **argv = NULL;
-  build_passthrough_argv(args, PYTHON3, LOG_TOOL, &argv);
-  if (!argv) return 1;
+// ====== builtin tables ======
+static char *builtin_str[] = {
+  "help",
+  "exit",
+  "cd",
+  "pwd",
+  "start",
+  "stop",
+  "restart",
+  "status",
+  "health",
+};
 
-  int rc = run_cmd_capture_rc(argv);
-  if (rc != 0) fprintf(stderr, "trade: log failed (rc=%d)\n", rc);
-  free(argv);
-  return 1;
+static int (*builtin_func[])(char **) = {
+  &sh_help,
+  &sh_exit,
+  &sh_cd,
+  &sh_pwd,
+  &sh_start,
+  &sh_stop,
+  &sh_restart,
+  &sh_status,
+  &sh_health,
+};
+
+static int num_builtins(void)
+{
+  return (int)(sizeof(builtin_str) / sizeof(builtin_str[0]));
 }
 
-static int sh_config(char **args)
+// ====== quote-aware tokenizer ======
+typedef struct {
+  char **items;
+  int len;
+  int cap;
+} strvec;
+
+static void sv_init(strvec *v) { v->items = NULL; v->len = 0; v->cap = 0; }
+
+static void sv_push(strvec *v, char *s)
 {
-  char **argv = NULL;
-  build_passthrough_argv(args, PYTHON3, CONFIG_TOOL, &argv);
-  if (!argv) return 1;
-
-  int rc = run_cmd_capture_rc(argv);
-  if (rc != 0) fprintf(stderr, "trade: config failed (rc=%d)\n", rc);
-  free(argv);
-  return 1;
-}
-
-static int sh_backup(char **args)
-{
-  char **argv = NULL;
-  build_passthrough_argv(args, PYTHON3, BACKUP_TOOL, &argv);
-  if (!argv) return 1;
-
-  int rc = run_cmd_capture_rc(argv);
-  if (rc != 0) fprintf(stderr, "trade: backup failed (rc=%d)\n", rc);
-  free(argv);
-  return 1;
-}
-
-static int sh_restore(char **args)
-{
-  char **argv = NULL;
-  build_passthrough_argv(args, PYTHON3, RESTORE_TOOL, &argv);
-  if (!argv) return 1;
-
-  int rc = run_cmd_capture_rc(argv);
-  if (rc != 0) fprintf(stderr, "trade: restore failed (rc=%d)\n", rc);
-  free(argv);
-  return 1;
-}
-
-static int sh_nano(char **args)
-{
-  char **argv = NULL;
-  build_passthrough_argv(args, NANO, NULL, &argv);
-  if (!argv) return 1;
-
-  int rc = run_cmd_capture_rc(argv);
-  if (rc != 0) fprintf(stderr, "trade: nano failed (rc=%d)\n", rc);
-  free(argv);
-  return 1;
-}
-
-static int sh_ls(char **args)
-{
-  char **argv = NULL;
-  build_passthrough_argv(args, LS, NULL, &argv);
-  if (!argv) return 1;
-
-  int rc = run_cmd_capture_rc(argv);
-  if (rc != 0) fprintf(stderr, "trade: ls failed (rc=%d)\n", rc);
-  free(argv);
-  return 1;
-}
-
-static int sh_cat(char **args)
-{
-  char **argv = NULL;
-  build_passthrough_argv(args, CAT, NULL, &argv);
-  if (!argv) return 1;
-
-  int rc = run_cmd_capture_rc(argv);
-  if (rc != 0) fprintf(stderr, "trade: cat failed (rc=%d)\n", rc);
-  free(argv);
-  return 1;
-}
-
-static int sh_scat(char **args)
-{
-  // scat [ARGS...] -> sudo cat [ARGS...]
-  int count = 0;
-  while (args[count] != NULL) count++;
-
-  char **argv = calloc((size_t)count + 2, sizeof(char*));
-  if (!argv) { perror("trade: calloc"); return 1; }
-
-  int i = 0;
-  argv[i++] = (char*)SUDO;
-  argv[i++] = (char*)CAT;
-  for (int j = 1; j < count; j++) argv[i++] = args[j];
-  argv[i] = NULL;
-
-  int rc = run_cmd_capture_rc(argv);
-  if (rc != 0) fprintf(stderr, "trade: scat failed (rc=%d)\n", rc);
-  free(argv);
-  return 1;
-}
-
-static int sh_grep(char **args)
-{
-  char **argv = NULL;
-  build_passthrough_argv(args, GREP, NULL, &argv);
-  if (!argv) return 1;
-
-  int rc = run_cmd_capture_rc(argv);
-  if (rc != 0) fprintf(stderr, "trade: grep failed (rc=%d)\n", rc);
-  free(argv);
-  return 1;
-}
-
-// ====== core loop ======
-#define TOK_BUFSIZE 64
-#define TOK_DELIM " \t\r\n"
-
-static char **split_line(char *line)
-{
-  int bufsize = TOK_BUFSIZE, position = 0;
-  char **tokens = malloc(bufsize * sizeof(char*));
-  if (!tokens) { perror("trade: malloc"); exit(1); }
-
-  char *token = strtok(line, TOK_DELIM);
-  while (token != NULL) {
-    tokens[position++] = token;
-    if (position >= bufsize) {
-      bufsize += TOK_BUFSIZE;
-      char **tmp = realloc(tokens, bufsize * sizeof(char*));
-      if (!tmp) { free(tokens); perror("trade: realloc"); exit(1); }
-      tokens = tmp;
-    }
-    token = strtok(NULL, TOK_DELIM);
+  if (v->len + 1 > v->cap) {
+    int ncap = (v->cap == 0) ? 16 : (v->cap * 2);
+    char **tmp = realloc(v->items, (size_t)ncap * sizeof(char*));
+    if (!tmp) { perror("trade: realloc"); exit(1); }
+    v->items = tmp;
+    v->cap = ncap;
   }
-  tokens[position] = NULL;
-  return tokens;
+  v->items[v->len++] = s;
 }
 
-static int execute(char **args)
+static void sv_free_all(strvec *v)
 {
-  if (args[0] == NULL) return 1;
+  for (int i = 0; i < v->len; i++) free(v->items[i]);
+  free(v->items);
+  v->items = NULL; v->len = 0; v->cap = 0;
+}
 
+static char *sb_finish(char **buf, int *len, int *cap)
+{
+  if (*len == 0) return NULL;
+  (*buf)[*len] = '\0';
+  char *out = strdup(*buf);
+  if (!out) { perror("trade: strdup"); exit(1); }
+  *len = 0;
+  return out;
+}
+
+static void sb_add(char **buf, int *len, int *cap, char c)
+{
+  if (*buf == NULL) {
+    *cap = 64;
+    *buf = malloc((size_t)(*cap));
+    if (!*buf) { perror("trade: malloc"); exit(1); }
+    *len = 0;
+  }
+  if (*len + 2 >= *cap) {
+    *cap *= 2;
+    char *tmp = realloc(*buf, (size_t)(*cap));
+    if (!tmp) { perror("trade: realloc"); exit(1); }
+    *buf = tmp;
+  }
+  (*buf)[(*len)++] = c;
+}
+
+static strvec tokenize(const char *line, int *parse_err)
+{
+  *parse_err = 0;
+  strvec out; sv_init(&out);
+
+  char *buf = NULL;
+  int blen = 0, bcap = 0;
+
+  enum { ST_NORMAL, ST_SQ, ST_DQ } st = ST_NORMAL;
+
+  for (size_t i = 0; line[i] != '\0'; i++) {
+    char c = line[i];
+
+    if (st == ST_NORMAL) {
+      if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
+        char *t = sb_finish(&buf, &blen, &bcap);
+        if (t) sv_push(&out, t);
+        continue;
+      }
+      if (c == '\'') { st = ST_SQ; continue; }
+      if (c == '"')  { st = ST_DQ; continue; }
+
+      if (c == '|') {
+        char *t = sb_finish(&buf, &blen, &bcap);
+        if (t) sv_push(&out, t);
+        sv_push(&out, strdup("|"));
+        continue;
+      }
+
+      if (c == '\\') {
+        // escape next char if exists
+        char n = line[i + 1];
+        if (n != '\0') { sb_add(&buf, &blen, &bcap, n); i++; continue; }
+        // trailing backslash -> treat as literal
+        sb_add(&buf, &blen, &bcap, c);
+        continue;
+      }
+
+      sb_add(&buf, &blen, &bcap, c);
+    }
+    else if (st == ST_SQ) {
+      if (c == '\'') { st = ST_NORMAL; continue; }
+      sb_add(&buf, &blen, &bcap, c);
+    }
+    else { // ST_DQ
+      if (c == '"') { st = ST_NORMAL; continue; }
+      if (c == '\\') {
+        char n = line[i + 1];
+        if (n != '\0') { sb_add(&buf, &blen, &bcap, n); i++; continue; }
+        sb_add(&buf, &blen, &bcap, c);
+        continue;
+      }
+      sb_add(&buf, &blen, &bcap, c);
+    }
+  }
+
+  if (st != ST_NORMAL) {
+    *parse_err = 1; // unclosed quote
+  }
+
+  char *t = sb_finish(&buf, &blen, &bcap);
+  if (t) sv_push(&out, t);
+
+  free(buf);
+  return out;
+}
+
+// ====== dispatch ======
+typedef enum {
+  CMD_PARENT_BUILTIN,   // help/exit/cd/pwd/start/stop...
+  CMD_EXEC_ALLOWED,     // can exec (and pipe)
+  CMD_UNKNOWN
+} cmd_kind;
+
+static cmd_kind classify_parent_builtin(const char *cmd)
+{
   for (int i = 0; i < num_builtins(); i++) {
-    if (strcmp(args[0], builtin_str[i]) == 0) {
-      return (*builtin_func[i])(args);
+    if (strcmp(cmd, builtin_str[i]) == 0) return CMD_PARENT_BUILTIN;
+  }
+  return CMD_UNKNOWN;
+}
+
+// Build exec argv for allowed exec-style commands.
+// `argv_out` must be freed by caller (free(argv_out) only, not strings).
+static cmd_kind build_exec_argv(char **args, char ***argv_out)
+{
+  *argv_out = NULL;
+  if (!args || !args[0]) return CMD_UNKNOWN;
+
+  // exec-style allowed commands:
+  // log/config/backup/restore -> python3 tool ...
+  // nano/ls/cat/grep -> direct
+  // scat -> sudo cat ...
+  // update -> (sudo) bash UPDATE_TOOL ...
+
+  if (strcmp(args[0], "log") == 0) {
+    build_passthrough_argv(args, PYTHON3, LOG_TOOL, argv_out);
+    return (*argv_out) ? CMD_EXEC_ALLOWED : CMD_UNKNOWN;
+  }
+  if (strcmp(args[0], "config") == 0) {
+    build_passthrough_argv(args, PYTHON3, CONFIG_TOOL, argv_out);
+    return (*argv_out) ? CMD_EXEC_ALLOWED : CMD_UNKNOWN;
+  }
+  if (strcmp(args[0], "backup") == 0) {
+    build_passthrough_argv(args, PYTHON3, BACKUP_TOOL, argv_out);
+    return (*argv_out) ? CMD_EXEC_ALLOWED : CMD_UNKNOWN;
+  }
+  if (strcmp(args[0], "restore") == 0) {
+    build_passthrough_argv(args, PYTHON3, RESTORE_TOOL, argv_out);
+    return (*argv_out) ? CMD_EXEC_ALLOWED : CMD_UNKNOWN;
+  }
+
+  if (strcmp(args[0], "nano") == 0) {
+    build_passthrough_argv(args, NANO, NULL, argv_out);
+    return (*argv_out) ? CMD_EXEC_ALLOWED : CMD_UNKNOWN;
+  }
+  if (strcmp(args[0], "ls") == 0) {
+    build_passthrough_argv(args, LS, NULL, argv_out);
+    return (*argv_out) ? CMD_EXEC_ALLOWED : CMD_UNKNOWN;
+  }
+  if (strcmp(args[0], "cat") == 0) {
+    build_passthrough_argv(args, CAT, NULL, argv_out);
+    return (*argv_out) ? CMD_EXEC_ALLOWED : CMD_UNKNOWN;
+  }
+  if (strcmp(args[0], "grep") == 0) {
+    build_passthrough_argv(args, GREP, NULL, argv_out);
+    return (*argv_out) ? CMD_EXEC_ALLOWED : CMD_UNKNOWN;
+  }
+
+  if (strcmp(args[0], "scat") == 0) {
+    // scat [ARGS...] -> sudo cat [ARGS...]
+    int count = 0;
+    while (args[count] != NULL) count++;
+    char **argv = calloc((size_t)count + 2, sizeof(char*));
+    if (!argv) { perror("trade: calloc"); return CMD_UNKNOWN; }
+    int i = 0;
+    argv[i++] = (char*)SUDO;
+    argv[i++] = (char*)CAT;
+    for (int j = 1; j < count; j++) argv[i++] = args[j];
+    argv[i] = NULL;
+    *argv_out = argv;
+    return CMD_EXEC_ALLOWED;
+  }
+
+  if (strcmp(args[0], "update") == 0) {
+    // update [ARGS...] -> (sudo) bash UPDATE_TOOL [ARGS...]
+    int count = 0;
+    while (args[count] != NULL) count++;
+
+    int use_sudo = g_use_sudo ? 1 : 0; // prefer sudo when available
+    int extra = use_sudo ? 1 : 0;      // sudo prefix
+    // argv: [sudo] bash UPDATE_TOOL + (count-1 args) + NULL
+    char **argv = calloc((size_t)(count + 3), sizeof(char*));
+    if (!argv) { perror("trade: calloc"); return CMD_UNKNOWN; }
+
+    int i = 0;
+    if (use_sudo) argv[i++] = (char*)SUDO;
+    argv[i++] = (char*)BASH;
+    argv[i++] = (char*)UPDATE_TOOL;
+    for (int j = 1; j < count; j++) argv[i++] = args[j];
+    argv[i] = NULL;
+
+    *argv_out = argv;
+    (void)extra;
+    return CMD_EXEC_ALLOWED;
+  }
+
+  return CMD_UNKNOWN;
+}
+
+// Convert a slice of tokens into args[] (NULL-terminated) without copying strings.
+// tokens are owned elsewhere; args array must be freed by caller.
+static char **tokens_to_args(char **tokens, int start, int end_exclusive)
+{
+  int n = end_exclusive - start;
+  if (n <= 0) return NULL;
+
+  char **args = calloc((size_t)n + 1, sizeof(char*));
+  if (!args) { perror("trade: calloc"); return NULL; }
+  for (int i = 0; i < n; i++) args[i] = tokens[start + i];
+  args[n] = NULL;
+  return args;
+}
+
+// ====== pipeline executor ======
+static int exec_pipeline(strvec *tokv)
+{
+  // split by '|'
+  int ncmd = 1;
+  for (int i = 0; i < tokv->len; i++) {
+    if (strcmp(tokv->items[i], "|") == 0) ncmd++;
+  }
+
+  // build command ranges
+  int *starts = calloc((size_t)ncmd, sizeof(int));
+  int *ends   = calloc((size_t)ncmd, sizeof(int));
+  if (!starts || !ends) { perror("trade: calloc"); free(starts); free(ends); return 1; }
+
+  int ci = 0;
+  int s = 0;
+  for (int i = 0; i <= tokv->len; i++) {
+    if (i == tokv->len || strcmp(tokv->items[i], "|") == 0) {
+      starts[ci] = s;
+      ends[ci] = i;
+      ci++;
+      s = i + 1;
     }
   }
 
-  fprintf(stderr, "trade: unknown command: %s (type 'help')\n", args[0]);
+  // validate and build exec argv for each stage
+  char ***argvs = calloc((size_t)ncmd, sizeof(char**));
+  if (!argvs) { perror("trade: calloc"); free(starts); free(ends); return 1; }
+
+  for (int k = 0; k < ncmd; k++) {
+    char **args = tokens_to_args(tokv->items, starts[k], ends[k]);
+    if (!args || !args[0]) {
+      fprintf(stderr, "trade: invalid pipeline (empty command)\n");
+      free(args);
+      goto fail;
+    }
+
+    // parent-only builtin is not allowed in pipeline
+    if (classify_parent_builtin(args[0]) == CMD_PARENT_BUILTIN) {
+      fprintf(stderr, "trade: '%s' cannot be used in a pipeline\n", args[0]);
+      free(args);
+      goto fail;
+    }
+
+    char **exec_argv = NULL;
+    if (build_exec_argv(args, &exec_argv) != CMD_EXEC_ALLOWED || !exec_argv) {
+      fprintf(stderr, "trade: command not allowed in pipeline: %s\n", args[0]);
+      free(args);
+      goto fail;
+    }
+
+    argvs[k] = exec_argv;
+    free(args);
+  }
+
+  // create pipes
+  int (*pipes)[2] = NULL;
+  if (ncmd > 1) {
+    pipes = calloc((size_t)(ncmd - 1), sizeof(int[2]));
+    if (!pipes) { perror("trade: calloc"); goto fail; }
+    for (int i = 0; i < ncmd - 1; i++) {
+      if (pipe(pipes[i]) != 0) {
+        perror("trade: pipe");
+        goto fail;
+      }
+    }
+  }
+
+  pid_t *pids = calloc((size_t)ncmd, sizeof(pid_t));
+  if (!pids) { perror("trade: calloc"); goto fail; }
+
+  // fork each stage
+  for (int i = 0; i < ncmd; i++) {
+    pid_t pid = fork();
+    if (pid < 0) {
+      perror("trade: fork");
+      goto fail;
+    }
+    if (pid == 0) {
+      // child: wire stdin/stdout
+      if (ncmd > 1) {
+        if (i > 0) {
+          dup2(pipes[i - 1][0], STDIN_FILENO);
+        }
+        if (i < ncmd - 1) {
+          dup2(pipes[i][1], STDOUT_FILENO);
+        }
+        // close all pipe fds
+        for (int j = 0; j < ncmd - 1; j++) {
+          close(pipes[j][0]);
+          close(pipes[j][1]);
+        }
+      }
+      execvp(argvs[i][0], argvs[i]);
+      fprintf(stderr, "trade: execvp failed: %s (%s)\n", argvs[i][0], strerror(errno));
+      _exit(127);
+    }
+    pids[i] = pid;
+  }
+
+  // parent: close pipes
+  if (ncmd > 1) {
+    for (int j = 0; j < ncmd - 1; j++) {
+      close(pipes[j][0]);
+      close(pipes[j][1]);
+    }
+  }
+
+  // wait
+  int last_rc = 0;
+  for (int i = 0; i < ncmd; i++) {
+    int status = 0;
+    if (waitpid(pids[i], &status, 0) < 0) {
+      perror("trade: waitpid");
+      last_rc = 1;
+      continue;
+    }
+    if (i == ncmd - 1) {
+      if (WIFEXITED(status)) last_rc = WEXITSTATUS(status);
+      else if (WIFSIGNALED(status)) last_rc = 128 + WTERMSIG(status);
+      else last_rc = 1;
+    }
+  }
+
+  // cleanup
+  free(pids);
+  if (pipes) free(pipes);
+  for (int i = 0; i < ncmd; i++) free(argvs[i]);
+  free(argvs);
+  free(starts);
+  free(ends);
+
+  (void)last_rc;
+  return 1;
+
+fail:
+  if (pipes) {
+    for (int j = 0; j < ncmd - 1; j++) {
+      // best effort close if opened
+      close(pipes[j][0]);
+      close(pipes[j][1]);
+    }
+  }
+  if (pipes) free(pipes);
+  if (argvs) {
+    for (int i = 0; i < ncmd; i++) free(argvs[i]);
+    free(argvs);
+  }
+  free(starts);
+  free(ends);
   return 1;
 }
 
+// ====== single command executor ======
+static int execute_single(strvec *tokv)
+{
+  // build args view
+  char **args = tokens_to_args(tokv->items, 0, tokv->len);
+  if (!args || !args[0]) { free(args); return 1; }
+
+  // parent builtins
+  cmd_kind pk = classify_parent_builtin(args[0]);
+  if (pk == CMD_PARENT_BUILTIN) {
+    for (int i = 0; i < num_builtins(); i++) {
+      if (strcmp(args[0], builtin_str[i]) == 0) {
+        int rc = (*builtin_func[i])(args);
+        free(args);
+        return rc;
+      }
+    }
+  }
+
+  // exec-style allowed
+  char **exec_argv = NULL;
+  if (build_exec_argv(args, &exec_argv) == CMD_EXEC_ALLOWED && exec_argv) {
+    int rc = run_cmd_capture_rc(exec_argv);
+    if (rc != 0) fprintf(stderr, "trade: command failed (rc=%d)\n", rc);
+    free(exec_argv);
+    free(args);
+    return 1;
+  }
+
+  fprintf(stderr, "trade: unknown/blocked command: %s (type 'help')\n", args[0]);
+  free(args);
+  return 1;
+}
+
+static int execute_line(const char *line)
+{
+  int perr = 0;
+  strvec tokv = tokenize(line, &perr);
+  if (perr) {
+    fprintf(stderr, "trade: parse error (unclosed quote)\n");
+    sv_free_all(&tokv);
+    return 1;
+  }
+  if (tokv.len == 0) {
+    sv_free_all(&tokv);
+    return 1;
+  }
+
+  // if contains '|', run pipeline
+  int has_pipe = 0;
+  for (int i = 0; i < tokv.len; i++) {
+    if (strcmp(tokv.items[i], "|") == 0) { has_pipe = 1; break; }
+  }
+
+  int rc;
+  if (has_pipe) rc = exec_pipeline(&tokv);
+  else rc = execute_single(&tokv);
+
+  sv_free_all(&tokv);
+  return rc;
+}
+
+// ====== IO ======
 static char *read_line(void)
 {
 #ifdef USE_READLINE
@@ -536,9 +812,7 @@ static void loop(void)
   int status = 1;
   while (status) {
     char *line = read_line();
-    char **args = split_line(line);
-    status = execute(args);
-    free(args);
+    status = execute_line(line);
     free(line);
   }
 }
