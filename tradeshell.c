@@ -1,12 +1,5 @@
 /*
-  tradeshell.c - Oracle Linux AutoTrade Dedicated Shell (Full)
-
-  Services/tools (from your mapping):
-    - systemctl ... fx-autotrade
-    - log    : python3 /opt/tools/get_log.py
-    - config : python3 /opt/tools/xmledit.py   (internal-complete; args passthrough)
-    - backup : python3 /opt/Innovations/tools/Buckup.py
-    - restore: python3 /opt/Innovations/tools/Restore.py
+  tradeshell.c - Oracle Linux AutoTrade Dedicated Shell (Fixed Full)
 
   Builtins:
     help, exit,
@@ -41,7 +34,7 @@
 #include <readline/history.h>
 #endif
 
-// ====== fixed paths / commands ======
+// ====== fixed commands / paths ======
 static const char *SERVICE_NAME = "fx-autotrade";
 
 static const char *SYSTEMCTL = "systemctl";
@@ -56,9 +49,8 @@ static const char *CONFIG_TOOL  = "/opt/tools/xmledit.py";
 static const char *BACKUP_TOOL  = "/opt/Innovations/tools/Buckup.py";
 static const char *RESTORE_TOOL = "/opt/Innovations/tools/Restore.py";
 
-// sudo optional
-static int g_use_sudo = 0;
 static const char *SUDO = "sudo";
+static int g_use_sudo = 0;
 // ===================================
 
 // ====== helpers ======
@@ -71,12 +63,11 @@ static void build_passthrough_argv(char **args,
                                    const char *prefix1,
                                    char ***out_argv)
 {
-  // args[0] is builtin name, pass args[1..]
   int count = 0;
   while (args[count] != NULL) count++;
 
   int prefix_count = (prefix0 ? 1 : 0) + (prefix1 ? 1 : 0);
-  int total = prefix_count + (count - 1) + 1; // +NULL
+  int total = prefix_count + (count - 1) + 1; // + NULL
 
   char **argv = calloc((size_t)total, sizeof(char*));
   if (!argv) {
@@ -118,7 +109,7 @@ static int run_cmd_capture_rc(char *const argv[])
 
 static void detect_sudo(void)
 {
-  // sudo -n true => 0 if non-interactive sudo allowed
+  // sudo -n true => 0 if non-interactive sudo allowed (NOPASSWD or cached)
   char *const argv[] = {(char*)SUDO, "-n", "true", NULL};
   int rc = run_cmd_capture_rc(argv);
   g_use_sudo = (rc == 0);
@@ -150,7 +141,69 @@ static void print_usage(void)
   puts("  - sudo is auto-detected (sudo -n true). systemctl uses sudo when available.");
 }
 
-// ====== builtins ======
+// ====== builtins declarations ======
+static int sh_help(char **args);
+static int sh_exit(char **args);
+static int sh_start(char **args);
+static int sh_stop(char **args);
+static int sh_restart(char **args);
+static int sh_status(char **args);
+static int sh_health(char **args);
+static int sh_log(char **args);
+static int sh_config(char **args);
+static int sh_backup(char **args);
+static int sh_restore(char **args);
+static int sh_nano(char **args);
+static int sh_ls(char **args);
+static int sh_cat(char **args);
+static int sh_scat(char **args);
+static int sh_grep(char **args);
+
+// ====== builtin tables (REAL definitions, no redeclare later) ======
+static char *builtin_str[] = {
+  "help",
+  "exit",
+  "start",
+  "stop",
+  "restart",
+  "status",
+  "health",
+  "log",
+  "config",
+  "backup",
+  "restore",
+  "nano",
+  "ls",
+  "cat",
+  "scat",
+  "grep",
+};
+
+static int (*builtin_func[])(char **) = {
+  &sh_help,
+  &sh_exit,
+  &sh_start,
+  &sh_stop,
+  &sh_restart,
+  &sh_status,
+  &sh_health,
+  &sh_log,
+  &sh_config,
+  &sh_backup,
+  &sh_restore,
+  &sh_nano,
+  &sh_ls,
+  &sh_cat,
+  &sh_scat,
+  &sh_grep,
+};
+
+static int num_builtins(void)
+{
+  return (int)(sizeof(builtin_str) / sizeof(builtin_str[0]));
+}
+
+// ====== builtins implementations ======
 static int sh_help(char **args) { (void)args; print_usage(); return 1; }
 static int sh_exit(char **args) { (void)args; return 0; }
 
@@ -362,26 +415,7 @@ static int sh_grep(char **args)
   return 1;
 }
 
-// ====== builtin dispatch ======
-static int num_builtins(void);
-static int (*builtin_func[]) (char **);
-static char *builtin_str[];
-
-static int execute(char **args)
-{
-  if (args[0] == NULL) return 1;
-
-  for (int i = 0; i < num_builtins(); i++) {
-    if (strcmp(args[0], builtin_str[i]) == 0) {
-      return (*builtin_func[i])(args);
-    }
-  }
-
-  fprintf(stderr, "trade: unknown command: %s (type 'help')\n", args[0]);
-  return 1;
-}
-
-// ====== tokenizer ======
+// ====== core loop ======
 #define TOK_BUFSIZE 64
 #define TOK_DELIM " \t\r\n"
 
@@ -404,6 +438,20 @@ static char **split_line(char *line)
   }
   tokens[position] = NULL;
   return tokens;
+}
+
+static int execute(char **args)
+{
+  if (args[0] == NULL) return 1;
+
+  for (int i = 0; i < num_builtins(); i++) {
+    if (strcmp(args[0], builtin_str[i]) == 0) {
+      return (*builtin_func[i])(args);
+    }
+  }
+
+  fprintf(stderr, "trade: unknown command: %s (type 'help')\n", args[0]);
+  return 1;
 }
 
 static char *read_line(void)
@@ -434,10 +482,6 @@ static void loop(void)
     free(args);
     free(line);
   }
-}
-
-static int num_builtins(void) {
-  return (int)(sizeof(builtin_str) / sizeof(builtin_str[0]));
 }
 
 int main(void)
