@@ -364,6 +364,7 @@ static void sv_free_all(strvec *v)
 
 static char *sb_finish(char **buf, int *len, int *cap)
 {
+  (void)cap;  // suppress unused-parameter warning
   if (*len == 0) return NULL;
   (*buf)[*len] = '\0';
   char *out = strdup(*buf);
@@ -539,7 +540,6 @@ static cmd_kind build_exec_argv(char **args, char ***argv_out)
     while (args[count] != NULL) count++;
 
     int use_sudo = g_use_sudo ? 1 : 0; // prefer sudo when available
-    int extra = use_sudo ? 1 : 0;      // sudo prefix
     // argv: [sudo] bash UPDATE_TOOL + (count-1 args) + NULL
     char **argv = calloc((size_t)(count + 3), sizeof(char*));
     if (!argv) { perror("trade: calloc"); return CMD_UNKNOWN; }
@@ -552,7 +552,6 @@ static cmd_kind build_exec_argv(char **args, char ***argv_out)
     argv[i] = NULL;
 
     *argv_out = argv;
-    (void)extra;
     return CMD_EXEC_ALLOWED;
   }
 
@@ -576,6 +575,13 @@ static char **tokens_to_args(char **tokens, int start, int end_exclusive)
 // ====== pipeline executor ======
 static int exec_pipeline(strvec *tokv)
 {
+  int (*pipes)[2] = NULL;
+  int npipes = 0;
+  pid_t *pids = NULL;
+  char ***argvs = NULL;
+  int *starts = NULL;
+  int *ends = NULL;
+
   // split by '|'
   int ncmd = 1;
   for (int i = 0; i < tokv->len; i++) {
@@ -583,8 +589,8 @@ static int exec_pipeline(strvec *tokv)
   }
 
   // build command ranges
-  int *starts = calloc((size_t)ncmd, sizeof(int));
-  int *ends   = calloc((size_t)ncmd, sizeof(int));
+  starts = calloc((size_t)ncmd, sizeof(int));
+  ends   = calloc((size_t)ncmd, sizeof(int));
   if (!starts || !ends) { perror("trade: calloc"); free(starts); free(ends); return 1; }
 
   int ci = 0;
@@ -599,7 +605,7 @@ static int exec_pipeline(strvec *tokv)
   }
 
   // validate and build exec argv for each stage
-  char ***argvs = calloc((size_t)ncmd, sizeof(char**));
+  argvs = calloc((size_t)ncmd, sizeof(char**));
   if (!argvs) { perror("trade: calloc"); free(starts); free(ends); return 1; }
 
   for (int k = 0; k < ncmd; k++) {
@@ -629,11 +635,18 @@ static int exec_pipeline(strvec *tokv)
   }
 
   // create pipes
-  int (*pipes)[2] = NULL;
   if (ncmd > 1) {
-    pipes = calloc((size_t)(ncmd - 1), sizeof(int[2]));
+    npipes = ncmd - 1;
+    pipes = calloc((size_t)npipes, sizeof(int[2]));
     if (!pipes) { perror("trade: calloc"); goto fail; }
-    for (int i = 0; i < ncmd - 1; i++) {
+
+    // init to -1 so fail-path close is safe even if pipe() fails mid-way
+    for (int i = 0; i < npipes; i++) {
+      pipes[i][0] = -1;
+      pipes[i][1] = -1;
+    }
+
+    for (int i = 0; i < npipes; i++) {
       if (pipe(pipes[i]) != 0) {
         perror("trade: pipe");
         goto fail;
@@ -641,7 +654,7 @@ static int exec_pipeline(strvec *tokv)
     }
   }
 
-  pid_t *pids = calloc((size_t)ncmd, sizeof(pid_t));
+  pids = calloc((size_t)ncmd, sizeof(pid_t));
   if (!pids) { perror("trade: calloc"); goto fail; }
 
   // fork each stage
@@ -653,7 +666,7 @@ static int exec_pipeline(strvec *tokv)
     }
     if (pid == 0) {
       // child: wire stdin/stdout
-      if (ncmd > 1) {
+      if (pipes && npipes > 0) {
         if (i > 0) {
           dup2(pipes[i - 1][0], STDIN_FILENO);
         }
@@ -661,9 +674,9 @@ static int exec_pipeline(strvec *tokv)
           dup2(pipes[i][1], STDOUT_FILENO);
         }
         // close all pipe fds
-        for (int j = 0; j < ncmd - 1; j++) {
-          close(pipes[j][0]);
-          close(pipes[j][1]);
+        for (int j = 0; j < npipes; j++) {
+          if (pipes[j][0] != -1) close(pipes[j][0]);
+          if (pipes[j][1] != -1) close(pipes[j][1]);
         }
       }
       execvp(argvs[i][0], argvs[i]);
@@ -674,10 +687,12 @@ static int exec_pipeline(strvec *tokv)
   }
 
   // parent: close pipes
-  if (ncmd > 1) {
-    for (int j = 0; j < ncmd - 1; j++) {
-      close(pipes[j][0]);
-      close(pipes[j][1]);
+  if (pipes && npipes > 0) {
+    for (int j = 0; j < npipes; j++) {
+      if (pipes[j][0] != -1) close(pipes[j][0]);
+      if (pipes[j][1] != -1) close(pipes[j][1]);
+      pipes[j][0] = -1;
+      pipes[j][1] = -1;
     }
   }
 
@@ -709,14 +724,14 @@ static int exec_pipeline(strvec *tokv)
   return 1;
 
 fail:
-  if (pipes) {
-    for (int j = 0; j < ncmd - 1; j++) {
-      // best effort close if opened
-      close(pipes[j][0]);
-      close(pipes[j][1]);
+  if (pipes && npipes > 0) {
+    for (int j = 0; j < npipes; j++) {
+      if (pipes[j][0] != -1) close(pipes[j][0]);
+      if (pipes[j][1] != -1) close(pipes[j][1]);
     }
   }
   if (pipes) free(pipes);
+  if (pids) free(pids);
   if (argvs) {
     for (int i = 0; i < ncmd; i++) free(argvs[i]);
     free(argvs);
