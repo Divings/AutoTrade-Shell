@@ -486,9 +486,30 @@ static cmd_kind build_exec_argv(char **args, char ***argv_out)
   // update -> (sudo) bash UPDATE_TOOL ...
 
   if (strcmp(args[0], "log") == 0) {
-    build_passthrough_argv(args, PYTHON3, LOG_TOOL, argv_out);
-    return (*argv_out) ? CMD_EXEC_ALLOWED : CMD_UNKNOWN;
-  }
+  int count = 0;
+  while (args[count] != NULL) count++;
+
+  // log [ARGS...] -> sudo python3 LOG_TOOL [ARGS...]
+  // argv: sudo, python3, LOG_TOOL, (count-1 args), NULL
+  // or if sudo not available: python3, LOG_TOOL, ...
+  int use_sudo = g_use_sudo ? 1 : 0;
+  int base = use_sudo ? 3 : 2; // [sudo python3 LOG_TOOL] or [python3 LOG_TOOL]
+
+  char **argv = calloc((size_t)(base + (count - 1) + 1), sizeof(char*));
+  if (!argv) { perror("trade: calloc"); return CMD_UNKNOWN; }
+
+  int i = 0;
+  if (use_sudo) argv[i++] = (char*)SUDO;
+  argv[i++] = (char*)PYTHON3;
+  argv[i++] = (char*)LOG_TOOL;
+
+  for (int j = 1; j < count; j++) argv[i++] = args[j];
+  argv[i] = NULL;
+
+  *argv_out = argv;
+  return CMD_EXEC_ALLOWED;
+}
+
   if (strcmp(args[0], "config") == 0) {
     build_passthrough_argv(args, PYTHON3, CONFIG_TOOL, argv_out);
     return (*argv_out) ? CMD_EXEC_ALLOWED : CMD_UNKNOWN;
