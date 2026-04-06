@@ -74,10 +74,6 @@ static void build_passthrough_argv(char **args,
                                    const char *prefix0,
                                    const char *prefix1,
                                    char ***out_argv)
-static void build_passthrough_argv(char **args,
-                                   const char *prefix0,
-                                   const char *prefix1,
-                                   char ***out_argv)
 {
   int count = 0;
   while (args[count] != NULL) count++;
