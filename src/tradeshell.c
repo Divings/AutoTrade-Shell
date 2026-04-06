@@ -53,6 +53,7 @@ static const char *NANO      = "nano";
 static const char *LS        = "ls";
 static const char *CAT       = "cat";
 static const char *GREP      = "grep";
+static const char *SYNC = "sync";
 
 static const char *LOG_TOOL     = "/opt/Innovations/System/tools/get_log.py";
 static const char *CONFIG_TOOL  = "/opt/Innovations/System/tools/xmledit.py";
@@ -581,7 +582,10 @@ static cmd_kind build_exec_argv(char **args, char ***argv_out)
     *argv_out = argv;
     return CMD_EXEC_ALLOWED;
   }
-
+  if (strcmp(args[0], "sync") == 0) {
+    build_passthrough_argv(args, SYNC, NULL, argv_out);
+    return (*argv_out) ? CMD_EXEC_ALLOWED : CMD_UNKNOWN;
+}
   return CMD_UNKNOWN;
 }
 
