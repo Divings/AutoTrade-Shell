@@ -54,10 +54,10 @@ static const char *LS        = "ls";
 static const char *CAT       = "cat";
 static const char *GREP      = "grep";
 
-static const char *LOG_TOOL     = "/opt/tools/get_log.py";
-static const char *CONFIG_TOOL  = "/opt/tools/xmledit.py";
-static const char *BACKUP_TOOL  = "/opt/Innovations/tools/Buckup.py";
-static const char *RESTORE_TOOL = "/opt/Innovations/tools/Restore.py";
+static const char *LOG_TOOL     = "/opt/Innovations/System/tools/get_log.py";
+static const char *CONFIG_TOOL  = "/opt/Innovations/System/tools/xmledit.py";
+static const char *BACKUP_TOOL  = "/opt/Innovations/System/tools/Buckup.py";
+static const char *RESTORE_TOOL = "/opt/Innovations/System/tools/Restore.py";
 static const char *UPDATE_TOOL  = "/opt/Innovations/System/Update.sh";
 
 static const char *SUDO = "sudo";
@@ -74,12 +74,17 @@ static void build_passthrough_argv(char **args,
                                    const char *prefix0,
                                    const char *prefix1,
                                    char ***out_argv)
+static void build_passthrough_argv(char **args,
+                                   const char *prefix0,
+                                   const char *prefix1,
+                                   char ***out_argv)
 {
   int count = 0;
   while (args[count] != NULL) count++;
 
-  int prefix_count = (prefix0 ? 1 : 0) + (prefix1 ? 1 : 0);
-  int total = prefix_count + (count - 1) + 1; // + NULL
+  // ★ sudoを常に追加
+  int prefix_count = 1 + (prefix0 ? 1 : 0) + (prefix1 ? 1 : 0);
+  int total = prefix_count + (count - 1) + 1;
 
   char **argv = calloc((size_t)total, sizeof(char*));
   if (!argv) {
@@ -89,8 +94,13 @@ static void build_passthrough_argv(char **args,
   }
 
   int i = 0;
+
+  // ★ 常にsudo
+  argv[i++] = (char*)SUDO;
+
   if (prefix0) argv[i++] = (char*)prefix0;
   if (prefix1) argv[i++] = (char*)prefix1;
+
   for (int j = 1; j < count; j++) argv[i++] = args[j];
   argv[i] = NULL;
 
@@ -141,10 +151,10 @@ static void print_usage(void)
   puts("  status                [sudo] systemctl status fx-autotrade");
   puts("  health                service + log + disk + mem + time");
   puts("");
-  puts("  log [ARGS...]         python3 /opt/tools/get_log.py [ARGS...]");
-  puts("  config [ARGS...]      python3 /opt/tools/xmledit.py [ARGS...]");
-  puts("  backup [ARGS...]      python3 /opt/Innovations/tools/Buckup.py [ARGS...]");
-  puts("  restore [ARGS...]     python3 /opt/Innovations/tools/Restore.py [ARGS...]");
+  puts("  log [ARGS...]         python3 /opt/Innovations/System/tools/get_log.py [ARGS...]");
+  puts("  config [ARGS...]      python3 /opt/Innovations/System/tools/xmledit.py [ARGS...]");
+  puts("  backup [ARGS...]      python3 /opt/Innovations/System/tools/Buckup.py [ARGS...]");
+  puts("  restore [ARGS...]     python3 /opt/Innovations/System/tools/Restore.py [ARGS...]");
   puts("  update [ARGS...]      [sudo] bash /opt/Innovations/System/Update.sh [ARGS...]");
   puts("");
   puts("  nano [ARGS...]        nano [ARGS...]");
