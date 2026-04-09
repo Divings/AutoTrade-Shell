@@ -585,7 +585,61 @@ static cmd_kind build_exec_argv(char **args, char ***argv_out)
   if (strcmp(args[0], "sync") == 0) {
     build_passthrough_argv(args, SYNC, NULL, argv_out);
     return (*argv_out) ? CMD_EXEC_ALLOWED : CMD_UNKNOWN;
-}
+  }
+  
+  if (strcmp(args[0], "install") == 0) {
+  if (!args[1]) {
+    fprintf(stderr, "trade: install: version required\n");
+    return CMD_UNKNOWN;
+  }
+
+  const char *version = args[1];
+  const char *home = getenv("HOME");
+
+  if (!home) {
+    fprintf(stderr, "trade: install: HOME not set\n");
+    return CMD_UNKNOWN;
+  }
+
+  // RPMファイルパス生成
+  char rpm_path[512];
+  snprintf(rpm_path, sizeof(rpm_path),
+           "%s/fx_autotrade-system-%s-2.el9.x86_64.rpm",
+           home, version);
+
+  int use_sudo = g_use_sudo ? 1 : 0;
+  
+  if (access(rpm_path, F_OK) != 0) {
+  fprintf(stderr, "trade: install: file not found: %s\n", rpm_path);
+  return CMD_UNKNOWN;
+  }
+  
+  // argv構築
+  // [sudo] yum install ./file.rpm
+  int argc = 0;
+if (use_sudo) argc++;
+argc += 4; // yum install -y file
+argc += 1; // NULL
+
+char **argv = calloc(argc, sizeof(char*));
+  if (!argv) {
+    perror("trade: calloc");
+    return CMD_UNKNOWN;
+  }
+
+  int i = 0;
+  if (use_sudo) argv[i++] = (char*)SUDO;
+
+  argv[i++] = "yum";
+  argv[i++] = "install";
+  argv[i++] = "-y";
+  argv[i++] = rpm_path;
+  argv[i] = NULL;
+
+  *argv_out = argv;
+  return CMD_EXEC_ALLOWED;
+  }
+
   return CMD_UNKNOWN;
 }
 
