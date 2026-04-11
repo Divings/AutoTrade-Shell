@@ -37,7 +37,9 @@
 #include <stdio.h>
 #include <string.h>
 #include <errno.h>
-
+#include <dirent.h>
+#include <ctype.h>
+#include <limits.h>
 #ifdef USE_READLINE
 #include <readline/readline.h>
 #include <readline/history.h>
