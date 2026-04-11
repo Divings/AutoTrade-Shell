@@ -170,6 +170,7 @@ static void print_usage(void)
   puts("  backup [ARGS...]      python3 /opt/Innovations/System/tools/Buckup.py [ARGS...]");
   puts("  restore [ARGS...]     python3 /opt/Innovations/System/tools/Restore.py [ARGS...]");
   puts("  update [ARGS...]      [sudo] bash /opt/Innovations/System/Update.sh [ARGS...]");
+  puts("  merge-rpmnew         add only new keys from /etc/AutoTrade/*.rpmnew");
   puts("");
   puts("  nano [ARGS...]        nano [ARGS...]");
   puts("  ls [ARGS...]          ls [ARGS...]");
@@ -225,7 +226,9 @@ static int split_key_value(const char *line,
 
   char *p = trim_ws(tmp);
   if (*p == '\0' || *p == '#') return 0;
-
+  if (strchr(p, '<') != NULL || strchr(p, '>') != NULL) {
+      return 0;
+  }
   char *eq = strchr(p, '=');
   if (!eq) return 0;
 
