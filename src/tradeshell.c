@@ -314,15 +314,24 @@ static int merge_rpmnew_file(const char *orig_path, const char *rpmnew_path)
   fclose(dst);
 
   if (added > 0) {
-    char merged_path[PATH_MAX];
+  char merged_path[PATH_MAX];
+
+  // ".merged" 分の余裕チェック（7文字 + NULL）
+  if (strlen(rpmnew_path) < sizeof(merged_path) - 8) {
+
     snprintf(merged_path, sizeof(merged_path), "%s.merged", rpmnew_path);
+
     if (rename(rpmnew_path, merged_path) == 0) {
       printf("trade: merge: renamed %s -> %s\n", rpmnew_path, merged_path);
     } else {
       fprintf(stderr, "trade: merge: rename failed: %s (%s)\n",
               rpmnew_path, strerror(errno));
     }
+
+  } else {
+    fprintf(stderr, "trade: merge: path too long, skip rename: %s\n", rpmnew_path);
   }
+}
 
   return 0;
 }
