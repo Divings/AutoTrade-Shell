@@ -69,6 +69,21 @@ static int g_use_sudo = 0;
 static int run_cmd_capture_rc(char *const argv[]);
 static void detect_sudo(void);
 static void print_usage(void);
+static int sh_merge_rpmnew(char **args);
+
+static char *trim_ws(char *s);
+static int ends_with(const char *s, const char *suffix);
+static int split_key_value(const char *line,
+                           char *keybuf, size_t keybuf_sz,
+                           char *valbuf, size_t valbuf_sz);
+static int find_key_value_in_file(const char *path, const char *target_key,
+                                  char *valbuf, size_t valbuf_sz);
+static int merge_rpmnew_file(const char *orig_path, const char *rpmnew_path);
+static int merge_rpmnew_in_dir(const char *dirpath);
+
+static int run_cmd_capture_rc(char *const argv[]);
+static void detect_sudo(void);
+static void print_usage(void);
 
 // ====== exec argv builder (passthrough) ======
 static void build_passthrough_argv(char **args,
@@ -174,6 +189,201 @@ static void print_usage(void)
 // ====== builtins (parent-only) ======
 static int sh_help(char **args) { (void)args; print_usage(); return 1; }
 static int sh_exit(char **args) { (void)args; return 0; }
+
+
+static char *trim_ws(char *s)
+{
+  while (*s && isspace((unsigned char)*s)) s++;
+  if (*s == '\0') return s;
+
+  char *end = s + strlen(s) - 1;
+  while (end > s && isspace((unsigned char)*end)) {
+    *end = '\0';
+    end--;
+  }
+  return s;
+}
+
+static int ends_with(const char *s, const char *suffix)
+{
+  size_t ls = strlen(s);
+  size_t lf = strlen(suffix);
+  if (ls < lf) return 0;
+  return strcmp(s + (ls - lf), suffix) == 0;
+}
+
+static int split_key_value(const char *line,
+                           char *keybuf, size_t keybuf_sz,
+                           char *valbuf, size_t valbuf_sz)
+{
+  if (!line || !keybuf || !valbuf || keybuf_sz == 0 || valbuf_sz == 0) return 0;
+
+  char tmp[4096];
+  snprintf(tmp, sizeof(tmp), "%s", line);
+
+  char *p = trim_ws(tmp);
+  if (*p == '\0' || *p == '#') return 0;
+
+  char *eq = strchr(p, '=');
+  if (!eq) return 0;
+
+  *eq = '\0';
+  char *key = trim_ws(p);
+  char *val = trim_ws(eq + 1);
+
+  if (*key == '\0') return 0;
+
+  snprintf(keybuf, keybuf_sz, "%s", key);
+  snprintf(valbuf, valbuf_sz, "%s", val);
+  return 1;
+}
+
+static int find_key_value_in_file(const char *path, const char *target_key,
+                                  char *valbuf, size_t valbuf_sz)
+{
+  FILE *fp = fopen(path, "r");
+  if (!fp) return 0;
+
+  char line[4096];
+  char key[1024];
+  char val[4096];
+  int found = 0;
+
+  while (fgets(line, sizeof(line), fp)) {
+    if (!split_key_value(line, key, sizeof(key), val, sizeof(val))) {
+      continue;
+    }
+
+    if (strcmp(key, target_key) == 0) {
+      snprintf(valbuf, valbuf_sz, "%s", val);
+      found = 1;
+      break;
+    }
+  }
+
+  fclose(fp);
+  return found;
+}
+
+static int merge_rpmnew_file(const char *orig_path, const char *rpmnew_path)
+{
+  FILE *src = fopen(rpmnew_path, "r");
+  if (!src) {
+    fprintf(stderr, "trade: merge: cannot open rpmnew: %s (%s)\n",
+            rpmnew_path, strerror(errno));
+    return 1;
+  }
+
+  FILE *dst = fopen(orig_path, "a");
+  if (!dst) {
+    fclose(src);
+    fprintf(stderr, "trade: merge: cannot open original: %s (%s)\n",
+            orig_path, strerror(errno));
+    return 1;
+  }
+
+  char line[4096];
+  char key[1024];
+  char rpmnew_val[4096];
+  char orig_val[4096];
+  int added = 0;
+
+  while (fgets(line, sizeof(line), src)) {
+    if (!split_key_value(line, key, sizeof(key), rpmnew_val, sizeof(rpmnew_val))) {
+      continue;
+    }
+
+    if (find_key_value_in_file(orig_path, key, orig_val, sizeof(orig_val))) {
+      if (strcmp(orig_val, rpmnew_val) != 0) {
+        printf("trade: merge: changed key skipped '%s'\n", key);
+      }
+      continue;
+    }
+
+    fprintf(dst, "\n%s", line);
+    if (line[strlen(line) - 1] != '\n') {
+      fputc('\n', dst);
+    }
+    added++;
+    printf("trade: merge: added key '%s' to %s\n", key, orig_path);
+  }
+
+  fclose(src);
+  fclose(dst);
+
+  if (added > 0) {
+    char merged_path[PATH_MAX];
+    snprintf(merged_path, sizeof(merged_path), "%s.merged", rpmnew_path);
+    if (rename(rpmnew_path, merged_path) == 0) {
+      printf("trade: merge: renamed %s -> %s\n", rpmnew_path, merged_path);
+    } else {
+      fprintf(stderr, "trade: merge: rename failed: %s (%s)\n",
+              rpmnew_path, strerror(errno));
+    }
+  }
+
+  return 0;
+}
+
+static int merge_rpmnew_in_dir(const char *dirpath)
+{
+  DIR *dir = opendir(dirpath);
+  if (!dir) {
+    fprintf(stderr, "trade: merge: cannot open dir: %s (%s)\n",
+            dirpath, strerror(errno));
+    return 1;
+  }
+
+  struct dirent *ent;
+  int processed = 0;
+
+  while ((ent = readdir(dir)) != NULL) {
+    if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) {
+      continue;
+    }
+
+    if (!ends_with(ent->d_name, ".rpmnew")) {
+      continue;
+    }
+
+    char rpmnew_path[PATH_MAX];
+    char orig_path[PATH_MAX];
+    char base[PATH_MAX];
+
+    snprintf(rpmnew_path, sizeof(rpmnew_path), "%s/%s", dirpath, ent->d_name);
+    snprintf(base, sizeof(base), "%s", ent->d_name);
+
+    size_t len = strlen(base);
+    if (len < 7) continue;
+    base[len - 7] = '\0';
+
+    snprintf(orig_path, sizeof(orig_path), "%s/%s", dirpath, base);
+
+    if (access(orig_path, F_OK) != 0) {
+      fprintf(stderr, "trade: merge: original not found for %s\n", rpmnew_path);
+      continue;
+    }
+
+    printf("trade: merge: checking %s\n", rpmnew_path);
+    merge_rpmnew_file(orig_path, rpmnew_path);
+    processed++;
+  }
+
+  closedir(dir);
+
+  if (processed == 0) {
+    printf("trade: merge: no .rpmnew files found in %s\n", dirpath);
+  }
+
+  return 0;
+}
+
+static int sh_merge_rpmnew(char **args)
+{
+  (void)args;
+  merge_rpmnew_in_dir("/etc/AutoTrade");
+  return 1;
+}
 
 static int sh_cd(char **args)
 {
@@ -322,6 +532,7 @@ static char *builtin_str[] = {
   "restart",
   "status",
   "health",
+  "merge-rpmnew",
 };
 
 static int (*builtin_func[])(char **) = {
@@ -334,6 +545,7 @@ static int (*builtin_func[])(char **) = {
   &sh_restart,
   &sh_status,
   &sh_health,
+  &sh_merge_rpmnew,
 };
 
 static int num_builtins(void)
